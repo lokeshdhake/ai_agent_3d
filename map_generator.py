@@ -1,11 +1,16 @@
 import random
 import numpy as np
+from typing import Iterator, List, Set
 
 class MapGenerator:
-    def __init__(self):
+    def __init__(self, n_cols=7):
         # Dimensions
         self.ROWS = 3
-        self.COLS = 3
+        self.COLS = n_cols
+        # Start in the middle lane
+        start_col = n_cols // 2
+        # State for generation: Tracks which columns the agent could validly be in
+        self.valid_cols_prev: Set[int] = {start_col}
         
     def check_survival(self, column_slice):
         """
@@ -30,82 +35,95 @@ class MapGenerator:
         moves = [current_col - 1, current_col, current_col + 1]
         return [c for c in moves if 0 <= c < self.COLS]
 
-    def generate_track(self, timesteps, difficulty="medium"):
-        """
-        Generates a solvable track.
-        
-        Args:
-            timesteps (int): Total length of track.
-            difficulty (str): 'easy', 'medium', 'hard'
-        
-        Returns:
-            list[np.ndarray]: List of 3x3 grids compliant with core.py
-        """
-        
-        # Difficulty settings (Probability of an obstacle appearing in a cell)
-        if difficulty == "easy":
+    def get_reachable_columns(self, current_col):
+        """Returns list of columns reachable from current_col (left, stay, right)"""
+        moves = [current_col - 1, current_col, current_col + 1]
+        # Filter out moves that go off the edges of the N-lane map
+        return [c for c in moves if 0 <= c < self.COLS]
+    
+    def reset(self):
+        """Resets the generator state to the beginning (Time 0)."""
+        # Reset to middle lane
+        self.valid_cols_prev = {self.COLS // 2}
+
+    def generate_step(self, difficulty = "medium") -> np.ndarray:
+        """ Generates exactly ONE single valid time-slice (3xN) based on the previous state """
+
+        if difficulty =="easy":
             obs_prob = 0.15
         elif difficulty == "medium":
             obs_prob = 0.30
-        else: # hard
-            obs_prob = 0.45
+        else:
+            obs_prob =0.45
+        valid_grid_found = False
+        attempts = 0
+        final_grid = np.zeros((self.ROWS,self.COLS), dtype=int)
 
+        while not valid_grid_found and attempts <100:
+            candidate_grid = np.zeros((self.ROWS,self.COLS), dtype=int)
+            # Dynamic Hard Mode Pattern (Works for any N width)
+            # Creates a funnel by blocking an edge and the middle
+            if difficulty == 'hard' and random.random() < 0.2:
+                # Pick either Left Edge (0) or Right Edge (N-1)
+                edge_cols = [0, self.COLS - 1]
+                blocked_col = random.choice(edge_cols)
+                middle_col = self.COLS // 2
+                
+                for r in range(self.ROWS):
+                    candidate_grid[r][blocked_col] = 1
+                    # Block the middle as well to force movement
+                    if middle_col != blocked_col: 
+                         candidate_grid[r][middle_col] = 1
+            else:
+                # Random noise generation across all N columns
+                for r in range(self.ROWS):
+                    for c in range(self.COLS):
+                        if random.random() < obs_prob:
+                            candidate_grid[r][c] = 1
+
+            # Solvability Check
+            valid_cols_next = set()
+            for prev_c in self.valid_cols_prev:
+                possible_moves = self.get_reachable_columns(prev_c)
+                for move_c in possible_moves:
+                    # Numpy slicing to extract the column at move_c
+                    col_slice = candidate_grid[:, move_c]
+                    if self.check_survival(col_slice):
+                        valid_cols_next.add(move_c)
+
+            if len(valid_cols_next) > 0:
+                final_grid = candidate_grid
+                self.valid_cols_prev = valid_cols_next
+                valid_grid_found = True
+            else:
+                attempts += 1
+        
+        if not valid_grid_found:
+             final_grid = np.zeros((self.ROWS, self.COLS), dtype=int)
+
+        return final_grid
+    def infinite_track(self, difficulty="medium") -> Iterator[np.ndarray]:
+        """Yields 3xN grids one by one FOREVER."""
+        self.reset()
+        yield np.zeros((self.ROWS, self.COLS), dtype=int)
+        while True:
+            yield self.generate_step(difficulty)
+
+    def generate_track(self, timesteps, difficulty="medium") -> List[np.ndarray]:
+        """Generates a fixed length track list."""
+        self.reset()
         track = []
-        
-        # Step 0 is always empty to give the agent a fair start
-        # MUST BE NP.ARRAY to match core.py expectations
-        empty_grid = np.zeros((self.ROWS, self.COLS), dtype=int)
-        track.append(empty_grid)
-        
-        valid_cols_prev = {1} 
-
-        for t in range(1, timesteps):
-            valid_grid_found = False
-            attempts = 0
-            
-            while not valid_grid_found and attempts < 100:
-                # 1. Generate a candidate grid (Temporary Python list for easy editing)
-                candidate_grid = [[0 for _ in range(self.COLS)] for _ in range(self.ROWS)]
-                
-                # For 'hard', sometimes force a specific pattern (funnel)
-                if difficulty == 'hard' and random.random() < 0.2:
-                    blocked_col = random.choice([0, 2])
-                    for r in range(self.ROWS):
-                        candidate_grid[r][blocked_col] = 1
-                        candidate_grid[r][1] = 1 
-                else:
-                    for r in range(self.ROWS):
-                        for c in range(self.COLS):
-                            if random.random() < obs_prob:
-                                candidate_grid[r][c] = 1
-
-                # 2. Solvability Check
-                valid_cols_next = set()
-                
-                for prev_c in valid_cols_prev:
-                    possible_moves = self.get_reachable_columns(prev_c)
-                    for move_c in possible_moves:
-                        col_slice = [candidate_grid[0][move_c], candidate_grid[1][move_c], candidate_grid[2][move_c]]
-                        if self.check_survival(col_slice):
-                            valid_cols_next.add(move_c)
-
-                # 3. Finalize
-                if len(valid_cols_next) > 0:
-                    # CONVERT TO NUMPY ARRAY BEFORE APPENDING
-                    track.append(np.array(candidate_grid))
-                    valid_cols_prev = valid_cols_next
-                    valid_grid_found = True
-                else:
-                    attempts += 1
-            
-            if not valid_grid_found:
-                track.append(empty_grid.copy())
-        
+        track.append(np.zeros((self.ROWS, self.COLS), dtype=int))
+        for _ in range(timesteps - 1):
+            track.append(self.generate_step(difficulty))
         return track
-
+    
 # --- Example Usage for Testing ---
 if __name__ == "__main__":
-    generator = MapGenerator()
-    track = generator.generate_track(10, "medium")
-    print(f"Generated {len(track)} grids.")
-    print(f"Type of grid: {type(track[0])}") # Should be <class 'numpy.ndarray'>
+    # Test with a wider map (e.g., 5 lanes)
+    WIDTH_N = 9
+    generator = MapGenerator(n_cols=WIDTH_N)
+    print(f"Testing generate_step with {WIDTH_N} lanes:")
+    generator.reset()
+    for i in range(3):
+        print(f"Slice {i}: \n{generator.generate_step()}")
